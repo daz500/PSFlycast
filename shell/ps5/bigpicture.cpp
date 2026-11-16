@@ -1381,9 +1381,45 @@ void topBar(ImDrawList *dl, int active, bool inGame, Reach reach = Reach::All)
 
 // ---------------------------------------------------------------- library
 
+enum class LibrarySystem
+{
+	All, Dreamcast, Naomi, Naomi2, Atomiswave, OtherArcade
+};
+
+LibrarySystem librarySystem = LibrarySystem::All;
+
+LibrarySystem systemOf(const GameMedia& media)
+{
+	if (!media.arcade)
+		return LibrarySystem::Dreamcast;
+
+	static const auto systems = [] {
+		std::map<std::string, LibrarySystem> result;
+		for (const ::Game* game = Games; game->name != nullptr; ++game)
+		{
+			LibrarySystem system = LibrarySystem::Naomi;
+			if (game->cart_type == AW)
+				system = LibrarySystem::Atomiswave;
+			else if (game->bios != nullptr && strcmp(game->bios, "naomi2") == 0)
+				system = LibrarySystem::Naomi2;
+			else if (game->bios != nullptr && strcmp(game->bios, "segasp") == 0)
+				system = LibrarySystem::OtherArcade;
+			result.emplace(game->name, system);
+		}
+		return result;
+	}();
+
+	std::string name = get_file_basename(media.fileName);
+	for (char& ch : name)
+		ch = (char)tolower((unsigned char)ch);
+	const auto entry = systems.find(name);
+	return entry == systems.end() ? LibrarySystem::OtherArcade : entry->second;
+}
+
 struct Game
 {
 	GameMedia media;
+	LibrarySystem system = LibrarySystem::Dreamcast;
 	GameBoxart art;
 	std::string title;
 	Source source = Internal;
@@ -1934,6 +1970,7 @@ bool refreshGames(bool networkOpen)
 	auto add = [](const GameMedia& m) {
 		Game g;
 		g.media = m;
+		g.system = systemOf(m);
 		g.source = sourceOf(m.path);
 		// An arcade set is listed as "file.zip (Its Full Name)": the name is the title.
 		g.title = m.arcade && !m.gameName.empty() && m.gameName != get_file_basename(m.fileName)
@@ -2328,12 +2365,18 @@ size_t listsKey(bool selectDisk)
 	size_t key = libraryGeneration;
 	key = key * 31 + (size_t)lib.source;
 	key = key * 31 + (selectDisk ? 1 : 0);
+	key = key * 31 + static_cast<size_t>(librarySystem);
 	key = key * 31 + (grouping(selectDisk) ? 1 : 0);
 	key = key * 31 + (ps5::options().showHidden ? 1 : 0);
 	if (selectDisk)
 		key = key * 31 + std::hash<std::string>()(insertedPath);
 	key = key * 31 + std::hash<std::string>()(librarySearch);
 	return key;
+}
+
+bool matchesSystem(const Game& game, bool selectDisk)
+{
+	return selectDisk || librarySystem == LibrarySystem::All || librarySystem == game.system;
 }
 
 bool matchesSearch(const Game& g)
@@ -2356,7 +2399,7 @@ void buildFlat(bool selectDisk)
 	lib.flat.clear();
 	for (size_t i = 0; i < games.size(); i++)
 		if (inSource(games[i].source) && (!selectDisk || games[i].disc) && !leftOut(games[i], selectDisk)
-				&& matchesSearch(games[i]))
+				&& matchesSystem(games[i], selectDisk) && matchesSearch(games[i]))
 			lib.flat.push_back(i);
 	std::sort(lib.flat.begin(), lib.flat.end(), [](size_t a, size_t b) {
 		return strcasecmp(games[a].title.c_str(), games[b].title.c_str()) < 0;
@@ -2495,7 +2538,7 @@ void buildShelves(bool selectDisk)
 		Shelf found{ searchShelfName() };
 		for (size_t i = 0; i < games.size(); i++)
 			if (inSource(games[i].source) && (!selectDisk || games[i].disc) && !leftOut(games[i], selectDisk)
-					&& matchesSearch(games[i]))
+					&& matchesSystem(games[i], selectDisk) && matchesSearch(games[i]))
 				found.items.push_back(i);
 		std::sort(found.items.begin(), found.items.end(), [](size_t a, size_t b) {
 			return strcasecmp(games[a].title.c_str(), games[b].title.c_str()) < 0;
@@ -2526,7 +2569,7 @@ void buildShelves(bool selectDisk)
 						for (size_t disc : discSets[games[i].set])
 							if (games[disc].front)
 								shown = disc;
-					if (!leftOut(games[shown], selectDisk)
+					if (matchesSystem(games[shown], selectDisk) && !leftOut(games[shown], selectDisk)
 							&& std::find(recent.items.begin(), recent.items.end(), shown) == recent.items.end())
 						recent.items.push_back(shown);
 				}
@@ -2535,7 +2578,8 @@ void buildShelves(bool selectDisk)
 		// The favourites, by title: the tab's Dreamcast and arcade games alike.
 		Shelf favourites{ "Favourites" };
 		for (size_t i = 0; i < games.size(); i++)
-			if (games[i].favourite && inSource(games[i].source) && !leftOut(games[i], selectDisk))
+			if (games[i].favourite && inSource(games[i].source)
+					&& matchesSystem(games[i], selectDisk) && !leftOut(games[i], selectDisk))
 				favourites.items.push_back(i);
 		std::sort(favourites.items.begin(), favourites.items.end(), [](size_t a, size_t b) {
 			return strcasecmp(games[a].title.c_str(), games[b].title.c_str()) < 0;
@@ -2557,7 +2601,8 @@ void buildShelves(bool selectDisk)
 	Shelf arcade{ "Arcade" };
 	for (size_t i = 0; i < games.size(); i++)
 	{
-		if (!inSource(games[i].source) || (selectDisk && !games[i].disc) || leftOut(games[i], selectDisk))
+		if (!inSource(games[i].source) || !matchesSystem(games[i], selectDisk)
+				|| (selectDisk && !games[i].disc) || leftOut(games[i], selectDisk))
 			continue;
 		if (!selectDisk && games[i].media.arcade)
 			arcade.items.push_back(i);
@@ -7718,6 +7763,14 @@ std::vector<Category> buildCategories()
 		storage.rows.push_back(r);
 	}
 	{
+		Row r{ Row::Choice, "Library system", "Show games for one system in the library.",
+			{ "All Systems", "Dreamcast", "NAOMI", "NAOMI 2", "Atomiswave", "Other arcade" },
+			{ 0, 1, 2, 3, 4, 5 } };
+		r.get = [] { return static_cast<int>(librarySystem); };
+		r.set = [](int v) { librarySystem = static_cast<LibrarySystem>(v); };
+		storage.rows.push_back(r);
+	}
+	{
 		Row r{ Row::Choice, "Library view", "Show the games as shelves, a compact grid or a list.",
 			{ "Shelves", "Grid", "List" }, { 0, 1, 2 } };
 		r.get = [] { return ps5::options().view; };
@@ -8187,7 +8240,7 @@ const std::vector<AreaDef>& areaDefs()
 		{ ICON_FA_DISPLAY, "Picture", { "Video" }, { "Internal resolution", "Upscaling" } },
 		{ ICON_FA_VOLUME_HIGH, "Sound", { "Audio" }, { "Volume", "Menu sounds" } },
 		{ ICON_FA_GAMEPAD, "Controls", { "Controls" }, { "Vibration", "PlayStation Move" } },
-		{ ICON_FA_FOLDER_OPEN, "Games and saves", { "Library", "Folders" }, { "Open on", "Library view" } },
+		{ ICON_FA_FOLDER_OPEN, "Games and saves", { "Library", "Folders" }, { "Open on", "Library view", "Library system" } },
 		{ ICON_FA_GLOBE, "Network", { "Online", "Achievements" }, { "Netplay", "RetroAchievements" } },
 		{ ICON_FA_PALETTE, "Interface", { "Interface" }, { "Interface size", "OLED care" } },
 		{ ICON_FA_MICROCHIP, "System", { "System", "About" }, { "Rewind", "Write logs" } },
